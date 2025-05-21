@@ -1,3 +1,5 @@
+# src/train.py
+```python
 import argparse
 import logging
 import joblib
@@ -15,21 +17,27 @@ from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 import lightgbm as lgb
 
-# 定数
+# Constants
 SEED = 42
 CV = RepeatedStratifiedKFold(n_splits=10, random_state=SEED)
 MODEL_DIR = 'models'
 
-# ログ設定
+# Logging configuration
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 
 def load_data(path: str) -> pd.DataFrame:
+    """
+    Load the dataset from an Excel file.
+    """
     logging.info(f"Loading data from {path}")
     return pd.read_excel(path)
 
 
 def preprocess(df: pd.DataFrame, target: str):
+    """
+    Split the DataFrame into features and target, and identify numeric and categorical columns.
+    """
     X = df.drop(columns=[target, 'INDEX', 'Day'])
     y = df[target]
     numeric_cols = X.select_dtypes(include="number").columns.tolist()
@@ -38,21 +46,33 @@ def preprocess(df: pd.DataFrame, target: str):
 
 
 def build_pipeline(numeric_cols, categorical_cols, estimator):
-    preprocessor = ColumnTransformer([
-        ("num", Pipeline([
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler())
-        ]), numeric_cols),
-        ("cat", Pipeline([
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("encoder", OneHotEncoder(handle_unknown="ignore"))
-        ]), categorical_cols)
+    """
+    Create a preprocessing and modeling pipeline.
+    """
+    numeric_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="median")),
+        ("scaler", StandardScaler())
     ])
-    return Pipeline([("preprocessor", preprocessor), ("classifier", estimator)])
+    categorical_pipeline = Pipeline([
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("encoder", OneHotEncoder(handle_unknown="ignore"))
+    ])
+    preprocessor = ColumnTransformer([
+        ("num", numeric_pipeline, numeric_cols),
+        ("cat", categorical_pipeline, categorical_cols)
+    ])
+    pipeline = Pipeline([
+        ("preprocessor", preprocessor),
+        ("classifier", estimator)
+    ])
+    return pipeline
 
 
 def select_and_tune(X, y, pipeline, param_grid):
-    # RFE + CV
+    """
+    Perform RFE with cross-validation and grid search for hyperparameter tuning.
+    """
+    # Recursive Feature Elimination with Cross-Validation
     selector = RFECV(
         estimator=pipeline.named_steps['classifier'],
         step=1,
@@ -62,13 +82,13 @@ def select_and_tune(X, y, pipeline, param_grid):
         min_features_to_select=20
     )
     selector.fit(pipeline.named_steps['preprocessor'].fit_transform(X), y)
-    mask = selector.support_
-    sel_cols = X.columns[mask]
-    logging.info(f"Selected {len(sel_cols)} features: {list(sel_cols)}")
+    selected_mask = selector.support_
+    selected_cols = X.columns[selected_mask]
+    logging.info(f"Selected {len(selected_cols)} features: {list(selected_cols)}")
 
-    # Pipeline with selected features
-    X_sel = X.loc[:, sel_cols]
-    tuned = GridSearchCV(
+    # Grid search on the reduced feature set
+    X_reduced = X[selected_cols]
+    grid_search = GridSearchCV(
         estimator=pipeline.set_params(**{"classifier": pipeline.named_steps['classifier']}),
         param_grid={f'classifier__{k}': v for k, v in param_grid.items()},
         cv=CV,
@@ -76,18 +96,26 @@ def select_and_tune(X, y, pipeline, param_grid):
         n_jobs=-1,
         verbose=1
     )
-    tuned.fit(X_sel, y)
-    logging.info(f"Best params: {tuned.best_params_}")
-    return tuned.best_estimator_, sel_cols
+    grid_search.fit(X_reduced, y)
+    logging.info(f"Best hyperparameters: {grid_search.best_params_}")
+    return grid_search.best_estimator_, selected_cols
 
 
 def main(args):
+    """
+    Main function: load data, preprocess, train and tune models, and save best pipelines.
+    """
+    # Ensure model directory exists
     os.makedirs(MODEL_DIR, exist_ok=True)
+
+    # Load and preprocess data
     df = load_data(args.input)
-    X, y, num_cols, cat_cols = preprocess(df, args.target)
+    X, y, numeric_cols, categorical_cols = preprocess(df, args.target)
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=args.test_size, stratify=y, random_state=SEED
     )
+
+    # Define models and hyperparameter grids
     models = {
         'LogisticRegression': (
             LogisticRegression(max_iter=10000, solver='liblinear', class_weight='balanced'),
@@ -126,18 +154,22 @@ def main(args):
             }
         )
     }
-    for name, (estimator, param_grid) in models.items():
-        logging.info(f"Processing {name}")
-        pipe = build_pipeline(num_cols, cat_cols, estimator)
-        best_model, features = select_and_tune(X_train, y_train, pipe, param_grid)
-        joblib.dump((best_model, list(features)), os.path.join(MODEL_DIR, f"{name}_best.pkl"))
 
-    logging.info("Training and tuning completed.")
+    # Train and tune each model
+    for name, (estimator, param_grid) in models.items():
+        logging.info(f"Training and tuning {name}")
+        pipeline = build_pipeline(numeric_cols, categorical_cols, estimator)
+        best_pipeline, selected_features = select_and_tune(X_train, y_train, pipeline, param_grid)
+        # Save the best pipeline and selected features
+        joblib.dump((best_pipeline, list(selected_features)), os.path.join(MODEL_DIR, f"{name}_best.pkl"))
+
+    logging.info("All models trained and tuned successfully.")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--input', required=True, help='Path to Excel data file')
-    parser.add_argument('--target', default='Event180', help='Target column name')
-    parser.add_argument('--test-size', type=float, default=0.2, help='Validation set fraction')
+    parser = argparse.ArgumentParser(description="Train and tune heart failure prognosis models")
+    parser.add_argument('--input', required=True, help='Path to the input Excel data file')
+    parser.add_argument('--target', default='Event180', help='Name of the target column')
+    parser.add_argument('--test-size', type=float, default=0.2, help='Proportion of data for validation')
     args = parser.parse_args()
     main(args)
+```
