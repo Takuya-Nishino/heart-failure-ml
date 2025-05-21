@@ -17,7 +17,7 @@ import lightgbm as lgb
 
 # 定数
 SEED = 42
-CV = RepeatedStratifiedKFold(n_splits=10, n_repeats=3, random_state=SEED)
+CV = RepeatedStratifiedKFold(n_splits=10, random_state=SEED)
 MODEL_DIR = 'models'
 
 # ログ設定
