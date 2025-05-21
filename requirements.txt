@@ -1,0 +1,9 @@
+numpy
+pandas
+scikit-learn
+xgboost
+lightgbm
+matplotlib
+shap
+japanize_matplotlib
+openpyxl
